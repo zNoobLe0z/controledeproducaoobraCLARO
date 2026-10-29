@@ -94,9 +94,4 @@ def init_db():
                 paredes_copa = [('Parede 01', 7.30), ('Parede 02', 7.30), ('Parede 04', 7.30), ('Pórtico', 7.30)]
                 for p_nome, p_medida in paredes_copa:
                     conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Copa', 'Drywall', :2, :3)"), {"1": andar, "2": p_nome, "3": p_medida * 3})
-                conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Core', 'Pintura', 'Parede 01', :2)"), {"1": andar, "2": 21.65 * 3})
-                conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Core', 'Pintura', 'Parede 02', :2)"), {"1": andar, "2": 9.80 * 3})
-
-                # Booths (Regra geral: 10º andar tem 2 booths, os demais têm 3)
-                qtd_booths = 2 if andar == '10º Pavimento' else 3
-                for i in range(1, qtd_bo
+                conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Core', 'Pintura', 'Parede 01
