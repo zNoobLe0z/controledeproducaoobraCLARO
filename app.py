@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, text
 st.set_page_config(page_title="Prodigy - Gestão de Obras", layout="wide")
 
 # ---------------------------------------------------------
-# 0. TELA DE LOGIN SIMPLES
+# 0. TELA DE LOGIN
 # ---------------------------------------------------------
 def check_password():
     if "password_correct" not in st.session_state:
@@ -29,27 +29,26 @@ if not check_password():
     st.stop()
 
 # ---------------------------------------------------------
-# 1. CONEXÃO COM POSTGRESQL (Supabase)
+# 1. CONEXÃO E ESTRUTURAÇÃO DO BANCO (V2 - Metragem Real)
 # ---------------------------------------------------------
 @st.cache_resource
 def init_connection():
-    # Conecta usando a URL configurada nos Secrets do Streamlit Cloud
     return create_engine(st.secrets["DB_URL"])
 
 engine = init_connection()
 
 def init_db():
     with engine.connect() as conn:
-        # Criar Tabelas no padrão PostgreSQL
-        conn.execute(text('''CREATE TABLE IF NOT EXISTS tb_elementos (
+        # Novas tabelas V2 para não conflitar com a versão anterior baseada em percentual
+        conn.execute(text('''CREATE TABLE IF NOT EXISTS tb_elementos_v2 (
                         id_elemento SERIAL PRIMARY KEY,
                         andar TEXT, ambiente TEXT, disciplina TEXT, 
                         identificacao TEXT, area_total_m2 NUMERIC)'''))
         
-        conn.execute(text('''CREATE TABLE IF NOT EXISTS tb_pesos (
-                        disciplina TEXT, etapa TEXT, peso NUMERIC)'''))
+        conn.execute(text('''CREATE TABLE IF NOT EXISTS tb_regras_metragem (
+                        disciplina TEXT, etapa TEXT, multiplicador NUMERIC)'''))
                         
-        conn.execute(text('''CREATE TABLE IF NOT EXISTS tb_apontamentos (
+        conn.execute(text('''CREATE TABLE IF NOT EXISTS tb_apontamentos_v2 (
                         id_apontamento SERIAL PRIMARY KEY,
                         id_elemento INTEGER, etapa TEXT, data_registo TEXT)'''))
                         
@@ -57,46 +56,69 @@ def init_db():
                         data_registo TEXT, disciplina TEXT, qtd_funcionarios INTEGER,
                         PRIMARY KEY (data_registo, disciplina))'''))
         
-        # Popular Pesos (Se vazio)
-        result_pesos = conn.execute(text("SELECT COUNT(*) FROM tb_pesos")).scalar()
-        if result_pesos == 0:
-            pesos = [
-                ('Drywall', '1ª Face', 0.25), ('Drywall', 'Reforços', 0.25), 
-                ('Drywall', '2ª Face', 0.25), ('Drywall', 'Acabamentos', 0.25),
-                ('Pintura', 'Emassamento', 0.20), ('Pintura', 'Lixa', 0.20), 
-                ('Pintura', '1ª Demão', 0.20), ('Pintura', '2ª Demão', 0.20), ('Pintura', '3ª Demão', 0.20),
-                ('Forro Modular', 'Estruturação', 0.50), ('Forro Modular', 'Plaqueamento', 0.50)
+        # Inserindo Regras de Multiplicadores (1.0 = 100% da área, 0.10 = 10% da área para reforços)
+        result_regras = conn.execute(text("SELECT COUNT(*) FROM tb_regras_metragem")).scalar()
+        if result_regras == 0:
+            regras = [
+                ('Drywall', '1ª Face', 1.0), ('Drywall', 'Reforços', 0.10), 
+                ('Drywall', '2ª Face', 1.0), ('Drywall', 'Acabamentos', 1.0),
+                ('Pintura', 'Emassamento', 1.0), ('Pintura', 'Lixa', 1.0), 
+                ('Pintura', '1ª Demão', 1.0), ('Pintura', '2ª Demão', 1.0), ('Pintura', '3ª Demão', 1.0),
+                ('Forro Modular', 'Estruturação', 1.0), ('Forro Modular', 'Plaqueamento', 1.0),
+                ('Forro Gesso Liso', 'Estruturação', 1.0), ('Forro Gesso Liso', 'Plaqueamento', 1.0), ('Forro Gesso Liso', 'Acabamento', 1.0)
             ]
-            for p in pesos:
-                conn.execute(text("INSERT INTO tb_pesos (disciplina, etapa, peso) VALUES (:1, :2, :3)"), 
-                             {"1": p[0], "2": p[1], "3": p[2]})
+            for r in regras:
+                conn.execute(text("INSERT INTO tb_regras_metragem (disciplina, etapa, multiplicador) VALUES (:1, :2, :3)"), 
+                             {"1": r[0], "2": r[1], "3": r[2]})
             
-        # Popular Levantamento Físico (Andares Padrões)
-        result_elem = conn.execute(text("SELECT COUNT(*) FROM tb_elementos")).scalar()
+        # Povoando o Levantamento Físico
+        result_elem = conn.execute(text("SELECT COUNT(*) FROM tb_elementos_v2")).scalar()
         if result_elem == 0:
-            andares_padrao = ['10º Pavimento', '09º Pavimento', '08º Pavimento', '06º Pavimento', '05º Pavimento', '03º Pavimento']
-            for andar in andares_padrao:
-                # Copa
+            andares_todos = ['10º Pavimento', '09º Pavimento', '08º Pavimento', '07º Pavimento', '06º Pavimento', '05º Pavimento', '04º Pavimento', '03º Pavimento']
+            
+            for andar in andares_todos:
+                # WC 1 e WC 2 (Em todos os andares)
+                for wc in ['WC 1', 'WC 2']:
+                    for p in ['Parede 01', 'Parede 02', 'Parede 03', 'Parede 04']:
+                        conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, :2, 'Drywall', :3, :4)"),
+                                     {"1": andar, "2": wc, "3": p, "4": 2.50 * 3})
+                    # Forro Gesso Liso WC e Pintura só no forro
+                    conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, :2, 'Forro Gesso Liso', 'Teto', 5.00)"), {"1": andar, "2": wc})
+                    conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, :2, 'Pintura', 'Teto', 5.00)"), {"1": andar, "2": wc})
+
+                # Copa e Core (Em todos os andares)
                 paredes_copa = [('Parede 01', 7.30), ('Parede 02', 7.30), ('Parede 04', 7.30), ('Pórtico', 7.30)]
                 for p_nome, p_medida in paredes_copa:
-                    conn.execute(text("INSERT INTO tb_elementos (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Copa', 'Drywall', :2, :3)"),
-                                 {"1": andar, "2": p_nome, "3": p_medida * 3})
-                
-                # Booths
-                for booth in ['Booth 01', 'Booth 02']:
+                    conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Copa', 'Drywall', :2, :3)"), {"1": andar, "2": p_nome, "3": p_medida * 3})
+                conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Core', 'Pintura', 'Parede 01', :2)"), {"1": andar, "2": 21.65 * 3})
+                conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Core', 'Pintura', 'Parede 02', :2)"), {"1": andar, "2": 9.80 * 3})
+
+                # Booths (Regra geral: 10º andar tem 2 booths, os demais têm 3)
+                qtd_booths = 2 if andar == '10º Pavimento' else 3
+                for i in range(1, qtd_booths + 1):
+                    booth = f'Booth 0{i}'
                     paredes_booth = [('Parede 01', 2.25), ('Parede 02', 2.40), ('Parede 03', 2.25), ('Parede 04', 2.40)]
                     for p_nome, p_medida in paredes_booth:
-                        conn.execute(text("INSERT INTO tb_elementos (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, :2, 'Drywall', :3, :4)"),
-                                     {"1": andar, "2": booth, "3": p_nome, "4": p_medida * 3})
-                    # Forro Booth
-                    conn.execute(text("INSERT INTO tb_elementos (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, :2, 'Forro Modular', 'Teto (Modular)', 3.50)"),
-                                 {"1": andar, "2": booth})
-                
-                # Core Pintura
-                conn.execute(text("INSERT INTO tb_elementos (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Core', 'Pintura', 'Parede 01', :2)"),
-                             {"1": andar, "2": 21.65 * 3})
-                conn.execute(text("INSERT INTO tb_elementos (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, 'Core', 'Pintura', 'Parede 02', :2)"),
-                             {"1": andar, "2": 9.80 * 3})
+                        conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, :2, 'Drywall', :3, :4)"), {"1": andar, "2": booth, "3": p_nome, "4": p_medida * 3})
+                    conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, :2, 'Forro Modular', 'Teto', 3.50)"), {"1": andar, "2": booth})
+
+                # Salas de Reunião (Regras Específicas do 4º Andar vs Padrão)
+                if andar == '04º Pavimento':
+                    reuniao_4 = [
+                        ('Reunião 01', [('Parede 01', 3.65), ('Parede 02', 3.85), ('Parede 03', 3.65), ('Parede 04', 3.85)]),
+                        ('Reunião 02', [('Parede 01', 3.65), ('Parede 02', 3.85), ('Parede 03', 3.65), ('Parede 04', 3.85)]),
+                        ('Reunião 03', [('Parede 01', 3.00), ('Parede 03', 3.00), ('Parede 04', 3.75)])
+                    ]
+                    for r_nome, r_paredes in reuniao_4:
+                        for p_nome, p_medida in r_paredes:
+                            conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, :2, 'Drywall', :3, :4)"), {"1": andar, "2": r_nome, "3": p_nome, "4": p_medida * 3})
+                else:
+                    for i in range(1, 4):
+                        r_nome = f'Reunião 0{i}'
+                        paredes_r = [('Parede 01', 4.50), ('Parede 02', 7.35), ('Parede 04', 7.35)]
+                        for p_nome, p_medida in paredes_r:
+                            conn.execute(text("INSERT INTO tb_elementos_v2 (andar, ambiente, disciplina, identificacao, area_total_m2) VALUES (:1, :2, 'Drywall', :3, :4)"), {"1": andar, "2": r_nome, "3": p_nome, "4": p_medida * 3})
+
         conn.commit()
 
 init_db()
@@ -104,19 +126,18 @@ init_db()
 # ---------------------------------------------------------
 # 2. INTERFACE E NAVEGAÇÃO
 # ---------------------------------------------------------
-st.title("🏗️ Prodigy - Controle de Produção")
+st.title("🏗️ Prodigy - Controle de Produção (Metragem Real)")
 aba1, aba2, aba3 = st.tabs(["📋 Lançamento de Produção", "👷 Controle de Efetivo", "📊 Dashboard Gerencial"])
 
-# --- ABA 1: LANÇAMENTO DE PRODUÇÃO ---
 with aba1:
     col1, col2, col3 = st.columns(3)
-    df_elem = pd.read_sql("SELECT DISTINCT andar, ambiente, disciplina FROM tb_elementos", engine)
+    df_elem = pd.read_sql("SELECT DISTINCT andar, ambiente, disciplina FROM tb_elementos_v2", engine)
     
     if not df_elem.empty:
         with col1:
-            andar_sel = st.selectbox("Andar", df_elem['andar'].unique())
+            andar_sel = st.selectbox("Andar", sorted(df_elem['andar'].unique(), reverse=True))
         with col2:
-            ambientes = df_elem[df_elem['andar'] == andar_sel]['ambiente'].unique()
+            ambientes = sorted(df_elem[df_elem['andar'] == andar_sel]['ambiente'].unique())
             amb_sel = st.selectbox("Ambiente", ambientes)
         with col3:
             disciplinas = df_elem[(df_elem['andar'] == andar_sel) & (df_elem['ambiente'] == amb_sel)]['disciplina'].unique()
@@ -124,27 +145,31 @@ with aba1:
 
         st.markdown(f"### {disc_sel} - {amb_sel} ({andar_sel})")
         
-        query = f"SELECT * FROM tb_elementos WHERE andar='{andar_sel}' AND ambiente='{amb_sel}' AND disciplina='{disc_sel}'"
+        query = f"SELECT * FROM tb_elementos_v2 WHERE andar='{andar_sel}' AND ambiente='{amb_sel}' AND disciplina='{disc_sel}' ORDER BY identificacao"
         elementos_atuais = pd.read_sql(query, engine)
-        etapas = pd.read_sql(f"SELECT etapa FROM tb_pesos WHERE disciplina='{disc_sel}'", engine)['etapa'].tolist()
+        etapas = pd.read_sql(f"SELECT etapa, multiplicador FROM tb_regras_metragem WHERE disciplina='{disc_sel}'", engine)
 
         for _, row in elementos_atuais.iterrows():
-            with st.expander(f"{row['identificacao']} (Área Total: {row['area_total_m2']:.2f} m²)"):
+            with st.expander(f"{row['identificacao']} (Área Base: {row['area_total_m2']:.2f} m²)"):
                 cols = st.columns(len(etapas))
-                for i, etapa in enumerate(etapas):
-                    df_apont = pd.read_sql(f"SELECT 1 FROM tb_apontamentos WHERE id_elemento={row['id_elemento']} AND etapa='{etapa}'", engine)
+                for i, etapa_row in etapas.iterrows():
+                    etapa = etapa_row['etapa']
+                    mult = etapa_row['multiplicador']
+                    metragem_etapa = row['area_total_m2'] * mult
+                    
+                    df_apont = pd.read_sql(f"SELECT 1 FROM tb_apontamentos_v2 WHERE id_elemento={row['id_elemento']} AND etapa='{etapa}'", engine)
                     foi_apontado = not df_apont.empty
                     
                     with cols[i]:
+                        st.caption(f"{metragem_etapa:.2f} m²")
                         if st.button(f"✔️ {etapa}" if foi_apontado else f"➕ {etapa}", key=f"{row['id_elemento']}_{etapa}"):
                             if not foi_apontado:
                                 with engine.connect() as conn:
-                                    conn.execute(text("INSERT INTO tb_apontamentos (id_elemento, etapa, data_registo) VALUES (:1, :2, :3)"),
+                                    conn.execute(text("INSERT INTO tb_apontamentos_v2 (id_elemento, etapa, data_registo) VALUES (:1, :2, :3)"),
                                                  {"1": row['id_elemento'], "2": etapa, "3": str(date.today())})
                                     conn.commit()
                                 st.rerun()
 
-# --- ABA 2: CONTROLE DE EFETIVO ---
 with aba2:
     st.markdown("### Lançamento Diário de Mão de Obra")
     with st.form("form_efetivo"):
@@ -152,13 +177,12 @@ with aba2:
         colA, colB, colC = st.columns(3)
         with colA: qtd_drywall = st.number_input("Oficiais Drywall", min_value=0, step=1)
         with colB: qtd_pintura = st.number_input("Oficiais Pintura", min_value=0, step=1)
-        with colC: qtd_forro = st.number_input("Oficiais Forro", min_value=0, step=1)
+        with colC: qtd_forro = st.number_input("Oficiais Forros", min_value=0, step=1)
         
         if st.form_submit_button("Salvar Efetivo"):
             with engine.connect() as conn:
-                for disc, qtd in [('Drywall', qtd_drywall), ('Pintura', qtd_pintura), ('Forro Modular', qtd_forro)]:
+                for disc, qtd in [('Drywall', qtd_drywall), ('Pintura', qtd_pintura), ('Forro Modular', qtd_forro), ('Forro Gesso Liso', qtd_forro)]:
                     if qtd > 0:
-                        # Sintaxe PostgreSQL para "Insert or Update" (Upsert)
                         conn.execute(text("""
                             INSERT INTO tb_efetivo (data_registo, disciplina, qtd_funcionarios) 
                             VALUES (:1, :2, :3) 
@@ -168,34 +192,44 @@ with aba2:
                 conn.commit()
             st.success("Efetivo gravado com sucesso!")
 
-# --- ABA 3: DASHBOARD ---
 with aba3:
-    query_avanco = """
-        SELECT e.andar, e.disciplina, sum(e.area_total_m2) as area_total,
-               sum(e.area_total_m2 * COALESCE(p.peso, 0)) as area_executada
-        FROM tb_elementos e
-        LEFT JOIN tb_apontamentos a ON e.id_elemento = a.id_elemento
-        LEFT JOIN tb_pesos p ON a.etapa = p.etapa AND e.disciplina = p.disciplina
-        GROUP BY e.andar, e.disciplina
+    # Cálculo preciso considerando o escopo total de metragem gerada pelas múltiplas etapas
+    query_dash = """
+        WITH Escopo AS (
+            SELECT e.andar, e.disciplina, sum(e.area_total_m2 * p.multiplicador) as area_total_escopo
+            FROM tb_elementos_v2 e
+            JOIN tb_regras_metragem p ON e.disciplina = p.disciplina
+            GROUP BY e.andar, e.disciplina
+        ),
+        Executado AS (
+            SELECT e.andar, e.disciplina, sum(e.area_total_m2 * p.multiplicador) as area_executada
+            FROM tb_elementos_v2 e
+            JOIN tb_apontamentos_v2 a ON e.id_elemento = a.id_elemento
+            JOIN tb_regras_metragem p ON a.etapa = p.etapa AND e.disciplina = p.disciplina
+            GROUP BY e.andar, e.disciplina
+        )
+        SELECT es.andar, es.disciplina, es.area_total_escopo, COALESCE(ex.area_executada, 0) as area_executada
+        FROM Escopo es
+        LEFT JOIN Executado ex ON es.andar = ex.andar AND es.disciplina = ex.disciplina
     """
-    df_dash = pd.read_sql(query_avanco, engine)
+    df_dash = pd.read_sql(query_dash, engine)
     
-    if not df_dash.empty and df_dash['area_total'].sum() > 0:
-        df_dash['% Concluído'] = (df_dash['area_executada'] / df_dash['area_total']) * 100
+    if not df_dash.empty:
+        df_dash['% Concluído'] = (df_dash['area_executada'] / df_dash['area_total_escopo']) * 100
         
         st.markdown("### Avanço por Disciplina e Andar")
         fig = px.bar(df_dash, x="andar", y="% Concluído", color="disciplina", barmode="group",
-                     text_auto='.1f', title="Status de Conclusão (%)")
+                     text_auto='.1f', title="Status de Conclusão (%) - Baseado em Metragem Executada")
         st.plotly_chart(fig, use_container_width=True)
         
-        st.markdown("### Indicador de Produtividade (Hoje)")
+        st.markdown("### Indicador de Produtividade Diária (Hoje)")
         hoje = str(date.today())
         
         query_prod = f"""
-            SELECT e.disciplina, sum(e.area_total_m2 * p.peso) as prod_hoje
-            FROM tb_apontamentos a
-            JOIN tb_elementos e ON a.id_elemento = e.id_elemento
-            JOIN tb_pesos p ON a.etapa = p.etapa AND e.disciplina = p.disciplina
+            SELECT e.disciplina, sum(e.area_total_m2 * p.multiplicador) as prod_hoje_m2
+            FROM tb_apontamentos_v2 a
+            JOIN tb_elementos_v2 e ON a.id_elemento = e.id_elemento
+            JOIN tb_regras_metragem p ON a.etapa = p.etapa AND e.disciplina = p.disciplina
             WHERE a.data_registo = '{hoje}'
             GROUP BY e.disciplina
         """
@@ -205,11 +239,9 @@ with aba3:
         m_cols = st.columns(3)
         for idx, row in df_prod.iterrows():
             disc = row['disciplina']
-            area_feita = row['prod_hoje']
+            area_feita = row['prod_hoje_m2']
             efetivo = df_efetivo[df_efetivo['disciplina'] == disc]['qtd_funcionarios'].sum() if not df_efetivo.empty else 0
             rendimento = (area_feita / efetivo) if efetivo > 0 else 0
             
             m_cols[idx % 3].metric(label=f"Rendimento {disc}", value=f"{rendimento:.1f} m²/homem", 
-                                   delta=f"{area_feita:.1f} m² totais hoje")
-    else:
-        st.info("Faça os primeiros lançamentos para gerar o Dashboard.")
+                                   delta=f"{area_feita:.1f} m² totais produzidos hoje")
